@@ -6,8 +6,9 @@ import {
 } from './utils.js';
 import * as CSV from './csv.js';
 import * as Charts from './charts.js';
+import * as Sync from './sync.js';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const HAWL_DAYS = 354;
 const GOLD_GRAMS = 85;
 const SILVER_GRAMS = 595;
@@ -1208,6 +1209,7 @@ VIEWS.settings = () => {
   return `
   <h2 style="margin-bottom:10px">Settings</h2>
   ${secure ? '' : `<div class="notice">⚠️ Offline mode and "install" need a secure connection (HTTPS or localhost). The app works here, but it won't load without your computer running. See README → "Full offline on your phone".</div>`}
+  ${syncCardHtml()}
   <div class="card">
     <div class="card-head"><h3>Appearance</h3></div>
     <div class="seg full">${['light', 'dark', 'system'].map((t) => `<button data-act="theme" data-v="${t}" class="${st.theme === t ? 'active' : ''}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div>
@@ -1274,8 +1276,10 @@ async function restoreJSON(file) {
     if (payload.app !== 'amanah-budget' || !payload.data) throw new Error('Not an Amanah Budget backup');
     const n = payload.data.transactions?.length || 0;
     if (!confirm(`Restore backup from ${payload.exported?.slice(0, 10) || 'unknown date'} (${n} transactions)? This REPLACES everything currently in the app.`)) return;
+    if (Sync.isOn() && !confirm('Sync is on: this restore will also replace the budget on your other synced devices. Continue?')) return;
+    const oldKeys = Sync.isOn() ? await Sync.currentKeys() : [];
     await DB.replaceAll(payload.data);
-    await loadAll(); applyTheme(); toast('Backup restored'); go('budget');
+    await loadAll(); applyTheme(); await Sync.markAll(oldKeys); toast('Backup restored'); go('budget');
   } catch (e) { alert('Could not restore: ' + e.message); }
 }
 
@@ -1343,6 +1347,7 @@ const ACTIONS = {
   'reset-all': async () => {
     if (!confirm('Erase ALL budget data on this device? Export a backup first if you might need it.')) return;
     if (prompt('Type ERASE to confirm') !== 'ERASE') return;
+    if (Sync.isOn()) { await Sync.disableNotifications(); Sync.disconnect(); toast('Sync stopped on this device — other devices keep their copy'); }
     await DB.replaceAll({}); await loadAll(); applyTheme(); toast('All data erased'); go('budget');
   }
 };
@@ -1402,7 +1407,7 @@ async function processSchedules() {
   for (const s of S.schedules) {
     if (!s.active || !s.autoPost) continue;
     let n = 0;
-    while (nextDue(s) <= t && !isEnded(s) && n < 500) { newTx.push(schedTx(s, nextDue(s))); s.count = (s.count || 0) + 1; n++; }
+    while (nextDue(s) <= t && !isEnded(s) && n < 500) { newTx.push({ ...schedTx(s, nextDue(s)), id: `auto-${s.id}-${s.count || 0}` }); s.count = (s.count || 0) + 1; n++; }
     if (n) changed.push(s);
   }
   if (newTx.length) {
@@ -1758,6 +1763,131 @@ Object.assign(CHANGES, {
   'debt-extra': async (el) => { S.settings.debtExtra = Math.abs(toCents(el.value)); await saveSettings(); rerender(); }
 });
 
+
+// ====================================================================
+// v1.2 — Sync & notifications UI
+// ====================================================================
+const timeAgo = (t) => { const s = Math.round((Date.now() - t) / 1000); if (s < 60) return 'just now'; if (s < 3600) return Math.round(s / 60) + ' min ago'; if (s < 86400) return Math.round(s / 3600) + ' h ago'; return fmtDate(iso(new Date(t))); };
+
+function safeRerender() {
+  const busy = $('#modal-root').classList.contains('open') || (document.activeElement && document.activeElement.matches && document.activeElement.matches('input,select,textarea'));
+  clearTimeout(safeRerender.t);
+  if (busy) { safeRerender.t = setTimeout(safeRerender, 3000); return; }
+  rerender();
+}
+
+function syncStatusHtml() {
+  const st = S.syncStatus || {}; const c = Sync.config(); const pend = Sync.pending();
+  if (st.s === 'syncing') return '<p class="muted" style="margin:0">⟳ Syncing…</p>';
+  if (st.s === 'error') return `<div class="notice" style="margin:0">⚠️ Last sync failed: ${esc(st.msg || '')}. Your changes are kept and will sync later.</div>`;
+  if (st.s === 'offline') return `<p class="muted" style="margin:0">Offline — ${pend} change${pend === 1 ? '' : 's'} waiting to sync.</p>`;
+  return `<p style="margin:0;color:var(--ok);font-weight:600">✓ Synced ${c && c.last ? timeAgo(c.last) : '—'}${pend ? ` · ${pend} pending` : ''}</p>`;
+}
+
+function syncCardHtml() {
+  if (!Sync.isOn()) return `<div class="card">
+    <div class="card-head"><h3>🔄 Sync &amp; notifications</h3></div>
+    <p style="margin-top:0">Keep this budget in step across your phones (and your family's), and get bill &amp; Zakat reminders as notifications. Uses your own free Cloudflare sync server.</p>
+    <label class="field"><span>Sync server address</span><input id="sync-url" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://amanah-sync.yourname.workers.dev" value="${esc(Sync.lastUrl())}"></label>
+    <div class="stack"><button class="btn block" data-act="sync-create">Start syncing from this device</button><button class="btn block ghost" data-act="sync-join">Join with a sync code</button></div>
+    <p class="hint"><b>Start</b> on the phone that already has your budget. <b>Join</b> on every other device — its current data is replaced by the synced budget.</p>
+  </div>`;
+  const c = Sync.config(); const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  return `<div class="card">
+    <div class="card-head"><h3>🔄 Sync &amp; notifications</h3></div>
+    <div id="sync-status">${syncStatusHtml()}</div>
+    <div class="stat" style="margin:10px 0"><div class="lbl">Sync code — enter it on your other devices</div><div class="val" id="sync-code" style="letter-spacing:.05em">•••••-•••••-•••••-•••••-•••••</div></div>
+    <div class="row wrap"><button class="btn sm ghost" data-act="sync-show">Show</button><button class="btn sm ghost" data-act="sync-copy">Copy</button><button class="btn sm soft" data-act="sync-now">⟳ Sync now</button></div>
+    <p class="hint">Keep this code private and safe: it unlocks your budget. Data is encrypted with it on your phone before upload, so the server can't read it.</p>
+    <div class="divider"></div>
+    <div class="toggle"><div class="t-text"><b>Notifications on this device</b><small>Bill reminders and your Zakat due date${ios ? '. iPhone: open the app from its Home Screen icon (iOS 16.4+)' : ''}.</small></div>${switchHtml('data-change="notify-toggle"', Sync.notifyOn())}</div>
+    <div class="toggle"><div class="t-text"><b>Show names &amp; amounts</b><small>"Rent · $2,100 due tomorrow" vs "A bill is due tomorrow". The reminder text is kept on your sync server so it can send it on time.</small></div>${switchHtml('data-change="notify-names"', S.settings.notifyNames !== false)}</div>
+    <div class="row wrap" style="margin-top:10px"><button class="btn sm ghost" data-act="notify-test" ${Sync.notifyOn() ? '' : 'disabled'}>Send test notification</button><button class="btn sm danger" data-act="sync-off">Stop syncing here</button></div>
+    <p class="hint" style="word-break:break-all">Server: ${esc(c.url)}</p>
+  </div>`;
+}
+
+function buildReminders() {
+  const out = []; const now = Date.now(); const names = S.settings.notifyNames !== false; const horizon = addDays(today(), 60);
+  const at9 = (dateStr, daysBefore) => { const [y, m, d] = dateStr.split('-').map(Number); return new Date(y, m - 1, d - daysBefore, 9, 0, 0).getTime(); };
+  const when = (n) => n === 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`;
+  for (const s of S.schedules) {
+    if (!s.active || s.autoPost) continue;
+    const rd = +s.remindDays || 0;
+    for (let n = s.count || 0; n < (s.count || 0) + 400; n++) {
+      const d = occurrence(s, n);
+      if (d > horizon || (s.endDate && d > s.endDate)) break;
+      const at = at9(d, rd); if (at < now - 3600e3) continue;
+      const inc = s.type === 'income';
+      out.push({
+        id: `s-${s.id}-${d}`, at,
+        title: names ? `${inc ? '💰' : '🧾'} ${s.name} ${inc ? 'expected' : 'due'} ${when(rd)}` : (inc ? `💰 Income expected ${when(rd)}` : `🧾 A bill is due ${when(rd)}`),
+        body: names ? `${money(s.amount)} · ${fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' })}` : 'Open Amanah Budget for details'
+      });
+    }
+  }
+  const h = hawlInfo();
+  if (h.start) {
+    const o = zakatOwed();
+    for (const before of [7, 0]) {
+      const at = at9(h.due, before); if (at < now - 3600e3) continue;
+      out.push({ id: `z-${h.due}-${before}`, at, title: `🌙 Zakat due ${when(before)}`, body: names && o.due ? `≈ ${money(o.due)} · your Hawl completes ${fmtDate(h.due)}` : 'Your Hawl is completing — open Amanah Budget' });
+    }
+  }
+  return out.sort((a, b) => a.at - b.at).slice(0, 400);
+}
+async function uploadRemindersNow(force) {
+  if (!Sync.isOn() || !S.settings.notify) return;
+  try { if (force) localStorage.removeItem('amanah-sync-remsig'); await Sync.uploadReminders(buildReminders()); } catch (e) { /* retried on next sync */ }
+}
+
+function showCodeModal(code, first) {
+  openModal(`${modalHead(first ? 'Sync is on ✓' : 'Your sync code')}
+    <p style="margin-top:0">${first ? 'Your budget is now encrypted and synced. ' : ''}To add another phone, install the app there, open <b>Settings → Sync</b>, enter the same server address, tap <b>Join with a sync code</b> and type:</p>
+    <div class="stat" style="text-align:center;margin:12px 0"><div class="val" style="font-size:1.15rem;letter-spacing:.06em;word-break:break-all">${esc(code)}</div></div>
+    <p class="hint">⚠️ Save it in your password manager or write it down. Without it, a new device can't join, and nobody (including us) can recover it.</p>
+    <div class="modal-actions"><button class="btn ghost" id="cm-copy">Copy code</button><button class="btn" data-close>I've saved it</button></div>`, {
+    onMount(m) { $('#cm-copy', m).onclick = () => navigator.clipboard?.writeText(code).then(() => toast('Copied')).catch(() => toast('Copy not available — write it down')); }
+  });
+}
+
+Object.assign(ACTIONS, {
+  'sync-create': async (el) => {
+    const url = $('#sync-url').value; const code = Sync.newCode();
+    el.disabled = true; el.textContent = 'Connecting…';
+    try { await Sync.create(url, code); }
+    catch (e) { Sync.disconnect(); el.disabled = false; el.textContent = 'Start syncing from this device'; return alert(e.message); }
+    rerender(); showCodeModal(code, true);
+  },
+  'sync-join': async (el) => {
+    const url = $('#sync-url').value;
+    const code = prompt('Enter the 25-character sync code from your other device:');
+    if (!code) return;
+    if (!confirm('Joining replaces the budget on THIS device with the synced budget. Continue?')) return;
+    el.disabled = true; el.textContent = 'Joining…';
+    try { await Sync.join(url, code); toast('Joined — your budget is synced'); go('budget'); }
+    catch (e) { el.disabled = false; el.textContent = 'Join with a sync code'; alert(e.message); }
+  },
+  'sync-show': () => { const el = $('#sync-code'); if (el) el.textContent = Sync.config().code; },
+  'sync-copy': () => navigator.clipboard?.writeText(Sync.config().code).then(() => toast('Sync code copied')).catch(() => showCodeModal(Sync.config().code)),
+  'sync-now': () => Sync.syncNow().then((r) => { toast(r ? `Synced · ${r.pushed} sent, ${r.pulled} received` : 'Synced'); rerender(); }).catch((e) => toast('Sync failed: ' + e.message)),
+  'sync-off': async () => {
+    if (!confirm('Stop syncing on this device? Your budget stays here, and other devices keep syncing with each other.')) return;
+    await Sync.disableNotifications(); Sync.disconnect(); S.syncStatus = null; rerender(); toast('Sync stopped on this device');
+  },
+  'notify-test': () => Sync.testNotification().then((r) => toast(r.sent ? `Test sent to ${r.sent} device${r.sent === 1 ? '' : 's'}` : 'No devices with notifications on')).catch((e) => toast('Failed: ' + e.message))
+});
+Object.assign(CHANGES, {
+  'notify-toggle': async (el) => {
+    if (el.checked) {
+      try { await Sync.enableNotifications(); S.settings.notify = true; await saveSettings(); await uploadRemindersNow(true); toast('Notifications on'); }
+      catch (e) { el.checked = false; alert(e.message); }
+    } else { await Sync.disableNotifications(); toast('Notifications off on this device'); }
+    rerender();
+  },
+  'notify-names': async (el) => { S.settings.notifyNames = el.checked; await saveSettings(); await uploadRemindersNow(true); toast('Saved'); }
+});
+
 function bindGlobal() {
   const view = $('#view');
   view.addEventListener('click', (e) => {
@@ -1796,11 +1926,22 @@ async function main() {
   }
   applyTheme();
   bindGlobal();
+  Sync.init({
+    reload: async () => { await loadAll(); applyTheme(); await processSchedules(); safeRerender(); },
+    status: (st, msg) => { S.syncStatus = { s: st, msg }; const el = $('#sync-status'); if (el) el.innerHTML = syncStatusHtml(); },
+    afterSync: () => uploadRemindersNow(false)
+  });
   const posted = await processSchedules();
   render();
+  const autoSync = () => { if (Sync.isOn() && navigator.onLine !== false) Sync.syncNow().catch(() => {}); };
+  autoSync();
+  window.addEventListener('online', autoSync);
+  setInterval(() => { if (document.visibilityState === 'visible') autoSync(); }, 60000);
   if (posted) toast(`${posted} recurring transaction${posted === 1 ? '' : 's'} added`);
   document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible' && await processSchedules()) rerender();
+    if (document.visibilityState !== 'visible') return;
+    if (await processSchedules()) rerender();
+    autoSync();
   });
   snapshot();
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
@@ -1811,4 +1952,4 @@ async function main() {
 main();
 
 // Expose for debugging in the console
-window.__amanah = { S, periodFor, zakatCalc, fundBalance, simulateDebts, buildICS, encryptBackup, decryptBackup };
+window.__amanah = { S, Sync, buildReminders, periodFor, zakatCalc, fundBalance, simulateDebts, buildICS, encryptBackup, decryptBackup };

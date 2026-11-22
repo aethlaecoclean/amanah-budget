@@ -16,6 +16,8 @@ amanah-budget/
 ├── js/csv.js         Bank CSV parser + CommBank/NAB/ANZ/Westpac detection
 ├── js/charts.js      SVG charts (no libraries)
 ├── js/utils.js       Money, dates, Hijri conversion
+├── js/sync.js        Encrypted sync + notifications
+├── worker/           Optional Cloudflare sync & push server
 └── icons/            App icons
 ```
 
@@ -92,6 +94,24 @@ Browsers can delete stored data if you clear site data, uninstall the app, or (o
 ## 6. Updating the app
 
 If you change any file, bump `CACHE` at the top of `sw.js` (e.g. `amanah-v1.0.1`). Then open the app twice on each device: once to download the new version, and once to use it.
+
+---
+
+## 7. Sync between devices & notifications (optional)
+
+Your budget can sync, end-to-end encrypted, between your phones (and your spouse's), and the app can send bill and Zakat reminders as notifications. You need your own free Cloudflare sync server: follow **[worker/README.md](worker/README.md)**, which takes about 10 minutes and works from a phone.
+
+Then, in the app:
+1. On the phone that has your budget: **Settings → Sync & notifications**. Paste your server address and tap **Start syncing from this device**. You'll get a **sync code**: save it in your password manager.
+2. On each other device: install the app, paste the same address, tap **Join with a sync code** and enter the code.
+3. Turn on **Notifications on this device**. On iPhone this only works in the app opened from its Home Screen icon, on iOS 16.4 or later.
+
+How it works:
+- Every record is encrypted on your phone with a key made from your sync code. The server stores only unreadable data.
+- Sync runs when you open the app, every minute while it's open, and a few seconds after each change. Offline changes sync when you're back online.
+- If two phones change the same item, the most recent change wins. New items from both phones are always kept.
+- The reminder text (e.g. "Rent · $2,100 due tomorrow") is stored on your server so it can be sent on time. Turn off *Show names & amounts* to send generic reminders instead.
+- If you lose the sync code, the synced copy can't be recovered. Each device still keeps its own full copy, and your backups still work.
 
 ---
 

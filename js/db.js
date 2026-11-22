@@ -10,6 +10,12 @@ const KEY_PATHS = { settings: 'key', snapshots: 'date' };
 
 let db = null;
 
+// Change hook (used by sync). Writes with { silent: true } don't trigger it.
+let onChange = null;
+export const setOnChange = (fn) => { onChange = fn; };
+export const keyOf = (name, value) => value[KEY_PATHS[name] || 'id'];
+const notify = (name, keys, deleted, opts) => { if (onChange && !(opts && opts.silent)) onChange(name, keys, deleted); };
+
 export function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -29,21 +35,24 @@ const store = (name, mode) => db.transaction(name, mode).objectStore(name);
 const done = (t) => new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
 
 export const getAll = (name) => wrap(store(name, 'readonly').getAll());
-export const put = (name, value) => wrap(store(name, 'readwrite').put(value));
-export const del = (name, key) => wrap(store(name, 'readwrite').delete(key));
+export const get = (name, key) => wrap(store(name, 'readonly').get(key));
+export const put = (name, value, opts) => wrap(store(name, 'readwrite').put(value)).then((r) => { notify(name, [keyOf(name, value)], false, opts); return r; });
+export const del = (name, key, opts) => wrap(store(name, 'readwrite').delete(key)).then((r) => { notify(name, [key], true, opts); return r; });
 
-export function bulkPut(name, values) {
+export async function bulkPut(name, values, opts) {
   const t = db.transaction(name, 'readwrite');
   const os = t.objectStore(name);
   values.forEach((v) => os.put(v));
-  return done(t);
+  await done(t);
+  notify(name, values.map((v) => keyOf(name, v)), false, opts);
 }
 
-export function bulkDel(name, keys) {
+export async function bulkDel(name, keys, opts) {
   const t = db.transaction(name, 'readwrite');
   const os = t.objectStore(name);
   keys.forEach((k) => os.delete(k));
-  return done(t);
+  await done(t);
+  notify(name, keys, true, opts);
 }
 
 export async function dumpAll() {
