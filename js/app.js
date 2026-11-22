@@ -7,7 +7,7 @@ import {
 import * as CSV from './csv.js';
 import * as Charts from './charts.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const HAWL_DAYS = 354;
 const GOLD_GRAMS = 85;
 const SILVER_GRAMS = 595;
@@ -18,7 +18,7 @@ const PERIODS_PER_YEAR = { monthly: 12, fortnightly: 26, weekly: 52 };
 // ====================================================================
 const S = {
   settings: {}, groups: [], categories: [], budgets: new Map(), transactions: [],
-  accounts: [], rules: [], zakatPayments: [], goals: [], snapshots: [],
+  accounts: [], rules: [], zakatPayments: [], goals: [], snapshots: [], schedules: [], debts: [],
   tab: 'budget', anchor: today(),
   filters: { q: '', cat: '', type: '', from: '', to: '' }
 };
@@ -107,6 +107,7 @@ async function loadAll() {
   }
   S.budgets = new Map(all.budgets.map((b) => [b.id, b]));
   S.transactions = all.transactions; S.rules = all.rules; S.zakatPayments = all.zakatPayments;
+  S.schedules = all.schedules || []; S.debts = all.debts || [];
   S.snapshots = all.snapshots.sort((a, b) => (a.date < b.date ? -1 : 1));
   reindex();
 }
@@ -332,7 +333,7 @@ function periodBar(p) {
     <div class="seg" role="tablist">
       ${['monthly', 'fortnightly', 'weekly'].map((x) => `<button data-act="ptype" data-v="${x}" class="${t === x ? 'active' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}
     </div>
-    <button class="btn sm ghost" data-act="copy-prev">⧉ Copy previous</button>
+    <div class="row"><button class="btn sm ghost" data-act="plan-recurring" title="Plan from bills &amp; recurring">↻ From bills</button><button class="btn sm ghost" data-act="copy-prev">⧉ Copy previous</button></div>
   </div>
   <div class="periodbar">
     <button class="icon-btn" data-act="period" data-dir="-1" aria-label="Previous period">‹</button>
@@ -388,7 +389,7 @@ VIEWS.budget = () => {
     <div class="stat"><div class="lbl">Income received</div><div class="val">${money(t.actIncome)}</div></div>
     <div class="stat"><div class="lbl">Spent</div><div class="val">${money(t.actOut)}</div></div>
     <div class="stat"><div class="lbl">Cash left</div><div class="val" style="color:${t.actIncome - t.actOut < 0 ? 'var(--over)' : 'inherit'}">${money(t.actIncome - t.actOut)}</div></div>
-  </div>`;
+  </div>` + remindersHtml();
   for (const g of S.groups) {
     const cats = S.categories.filter((c) => c.groupId === g.id);
     const gPl = cats.reduce((s, c) => s + planned(p, c.id), 0);
@@ -577,7 +578,7 @@ VIEWS.transactions = () => {
   const f = S.filters;
   return `
   <div class="row between" style="margin-bottom:10px"><h2>Transactions</h2>
-    <div class="row"><button class="btn sm soft" data-act="import-csv">⇪ Import CSV</button></div></div>
+    <div class="row"><button class="btn sm ghost" data-act="go-bills">↻ Recurring</button><button class="btn sm soft" data-act="import-csv">⇪ Import CSV</button></div></div>
   <div class="card filters">
     <input type="search" class="full" placeholder="Search merchant, notes, category, amount…" value="${esc(f.q)}" data-input="tx-q">
     <select data-change="tx-filter" data-k="cat"><option value="">All categories</option><option value="__none" ${f.cat === '__none' ? 'selected' : ''}>Uncategorised</option>${catOptions(f.cat, { includeNone: false })}</select>
@@ -592,7 +593,7 @@ VIEWS.transactions = () => {
   <div id="txlist">${txListHtml()}</div>`;
 };
 
-function txModal(tx, preset = {}) {
+function txModal(tx, preset = {}, onSaved = null) {
   const isNew = !tx;
   tx = tx ? clone(tx) : { id: uid(), date: today(), type: 'expense', amount: 0, merchant: '', notes: '', splits: [{ categoryId: '', amount: 0 }], created: Date.now(), ...preset };
   let split = tx.splits.length > 1;
@@ -695,6 +696,7 @@ function txModal(tx, preset = {}) {
           if (sum !== total) return toast(`Splits add up to ${money(sum)}, not ${money(total)}`);
         } else tx.splits = [{ categoryId: $('#t-cat', m).value, amount: total }];
         await saveRec('transactions', tx);
+        if (onSaved) await onSaved(tx);
         closeModal(); toast(isNew ? 'Transaction added' : 'Saved'); rerender(); snapshot();
       };
       $('#t-del', m) && ($('#t-del', m).onclick = async () => {
@@ -1080,7 +1082,7 @@ function goalStats(g) {
   };
 }
 
-VIEWS.goals = () => `
+const goalsHtml = () => `
   <div class="row between" style="margin-bottom:10px"><h2>Savings goals</h2><button class="btn sm soft" data-act="add-goal">+ New goal</button></div>
   ${S.goals.map((g) => {
     const s = goalStats(g);
@@ -1102,6 +1104,7 @@ VIEWS.goals = () => `
       <p class="hint">${s.cat ? `Linked to the <b>${esc(s.cat.name)}</b> sinking fund — progress updates as you budget into it.` : 'Manual balance — edit the goal to update it, or link it to a sinking fund.'}</p>
     </div>`;
   }).join('') || '<div class="card"><p class="empty">No goals yet. Add one — like a $40,000–$80,000 house deposit.</p></div>'}`;
+VIEWS.goals = () => goalsHtml() + debtHtml();
 
 function goalCalc(el) {
   const g = S.goals.find((x) => x.id === el.dataset.id); const s = goalStats(g);
@@ -1219,11 +1222,14 @@ VIEWS.settings = () => {
   <div class="card">
     <div class="card-head"><h3>Backup &amp; data</h3></div>
     <div class="stack">
-      <button class="btn block" data-act="export-json">⬇ Export full backup (JSON)</button>
+      <button class="btn block" data-act="backup-enc">🔒 Encrypted backup to iCloud / Google Drive</button>
+      <button class="btn block ghost" data-act="export-json">⬇ Export full backup (JSON)</button>
       <label class="btn block ghost" style="cursor:pointer">⬆ Restore from backup (JSON)<input type="file" accept=".json,application/json" data-change="restore-json" hidden></label>
       <button class="btn block ghost" data-act="export-csv">⬇ Export transactions (CSV)</button>
       <button class="btn block soft" data-act="import-csv">⇪ Import bank statement (CSV)</button>
+      <button class="btn block soft" data-act="export-ics">📅 Add bills &amp; Zakat date to Calendar</button>
     </div>
+    <p class="hint">Last backup: <b>${st.lastBackup ? fmtDate(st.lastBackup) : 'never'}</b></p>
     <p class="hint">Your data lives only in this browser on this device (${S.transactions.length} transactions). Export a backup regularly — clearing browser data or uninstalling deletes it. Restore the file on another device to move your budget.</p>
     <p class="hint" id="persist-status"></p>
   </div>
@@ -1259,7 +1265,12 @@ async function exportJSON() {
 
 async function restoreJSON(file) {
   try {
-    const payload = JSON.parse(await file.text());
+    let payload = JSON.parse(await file.text());
+    if (payload.app === 'amanah-budget' && payload.encrypted) {
+      const pass = prompt('This backup is encrypted. Enter its passphrase:');
+      if (!pass) return;
+      try { payload = await decryptBackup(payload, pass); } catch (e) { throw new Error('Wrong passphrase, or the file is damaged'); }
+    }
     if (payload.app !== 'amanah-budget' || !payload.data) throw new Error('Not an Amanah Budget backup');
     const n = payload.data.transactions?.length || 0;
     if (!confirm(`Restore backup from ${payload.exported?.slice(0, 10) || 'unknown date'} (${n} transactions)? This REPLACES everything currently in the app.`)) return;
@@ -1363,6 +1374,390 @@ const INPUTS = {
   'goal-calc': goalCalc
 };
 
+// ====================================================================
+// v1.1 — Bills & recurring, Calendar export, Debt planner, Encrypted backup
+// ====================================================================
+const FREQS = { weekly: 'Weekly', fortnightly: 'Fortnightly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly' };
+const PER_MONTH = { weekly: 52 / 12, fortnightly: 26 / 12, monthly: 1, quarterly: 1 / 3, yearly: 1 / 12 };
+
+function occurrence(s, n) {
+  switch (s.freq) {
+    case 'weekly': return addDays(s.startDate, 7 * n);
+    case 'fortnightly': return addDays(s.startDate, 14 * n);
+    case 'quarterly': return addMonths(s.startDate, 3 * n);
+    case 'yearly': return addMonths(s.startDate, 12 * n);
+    default: return addMonths(s.startDate, n);
+  }
+}
+const nextDue = (s) => occurrence(s, s.count || 0);
+const isEnded = (s) => !!s.endDate && nextDue(s) > s.endDate;
+
+function schedTx(s, date, amount = s.amount) {
+  return { id: uid(), date, type: s.type, amount, merchant: s.name, notes: s.notes || '', splits: [{ categoryId: s.categoryId, amount }], scheduleId: s.id, created: Date.now() };
+}
+
+// Auto-add any recurring transactions that have come due (runs at start-up and when the app is reopened).
+async function processSchedules() {
+  const t = today(); const newTx = []; const changed = [];
+  for (const s of S.schedules) {
+    if (!s.active || !s.autoPost) continue;
+    let n = 0;
+    while (nextDue(s) <= t && !isEnded(s) && n < 500) { newTx.push(schedTx(s, nextDue(s))); s.count = (s.count || 0) + 1; n++; }
+    if (n) changed.push(s);
+  }
+  if (newTx.length) {
+    await DB.bulkPut('transactions', newTx); S.transactions.push(...newTx);
+    await DB.bulkPut('schedules', changed); snapshot();
+  }
+  return newTx.length;
+}
+
+function dueSoon(days = 7) {
+  const lim = addDays(today(), days);
+  return S.schedules.filter((s) => s.active && !isEnded(s) && nextDue(s) <= lim)
+    .map((s) => ({ s, date: nextDue(s), days: daysBetween(today(), nextDue(s)) }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+const dueLabel = (d) => d < 0 ? `Overdue ${-d} day${d === -1 ? '' : 's'}` : d === 0 ? 'Due today' : d === 1 ? 'Due tomorrow' : `In ${d} days`;
+const dueCls = (d) => d < 0 ? 'dup' : d <= 2 ? 'maybe' : 'new';
+
+function remindersHtml() {
+  const lines = [];
+  for (const { s, date, days } of dueSoon(7)) {
+    lines.push(`<div class="due-item">
+      <span><b>${esc(s.name)}</b><small><span class="pill ${dueCls(days)}">${dueLabel(days)}</span> ${fmtDate(date, { weekday: 'short', day: 'numeric', month: 'short' })}${s.autoPost ? ' · auto-adds' : ''}</small></span>
+      <span class="row"><span class="num" style="font-weight:700;${s.type === 'income' ? 'color:var(--ok)' : ''}">${s.type === 'income' ? '+' : ''}${money(s.amount)}</span>
+      ${s.autoPost ? '' : `<button class="btn sm soft" data-act="pay-sched" data-id="${s.id}">${s.type === 'income' ? 'Got it' : 'Paid'}</button>`}</span></div>`);
+  }
+  const h = hawlInfo();
+  if (h.start && h.daysLeft <= 30) {
+    lines.push(`<div class="due-item"><span><b>🌙 Zakat due</b><small><span class="pill ${h.daysLeft < 0 ? 'dup' : 'maybe'}">${dueLabel(h.daysLeft)}</span> ${fmtDate(h.due)} · ${esc(hijri(h.due))}</small></span><button class="btn sm gold" data-act="go-zakat">View</button></div>`);
+  }
+  const lb = S.settings.lastBackup; const since = lb ? daysBetween(lb, today()) : null;
+  if (S.transactions.length >= 20 && (since === null || since > 30)) {
+    lines.push(`<div class="due-item"><span><b>💾 Back up your budget</b><small>${since === null ? 'No backup yet' : `Last backup ${since} days ago`}</small></span><button class="btn sm soft" data-act="backup-enc">Back up</button></div>`);
+  }
+  const empty = S.schedules.length
+    ? '<p class="muted" style="margin:0">Nothing due in the next 7 days.</p>'
+    : '<p class="muted" style="margin:0">Add your bills, rent, salary and subscriptions to get reminders and auto-entries.</p>';
+  return `<div class="card"><div class="card-head"><h3>🔔 Coming up</h3><button class="link-btn" style="padding:0" data-act="go-bills">Bills &amp; recurring ›</button></div>${lines.join('') || empty}</div>`;
+}
+
+VIEWS.bills = () => {
+  const act = S.schedules.filter((s) => s.active && !isEnded(s));
+  const monthlyOut = act.filter((s) => s.type !== 'income').reduce((t, s) => t + s.amount * PER_MONTH[s.freq], 0);
+  const monthlyIn = act.filter((s) => s.type === 'income').reduce((t, s) => t + s.amount * PER_MONTH[s.freq], 0);
+  const list = [...S.schedules].sort((a, b) => {
+    const ea = !a.active || isEnded(a), eb = !b.active || isEnded(b);
+    if (ea !== eb) return ea ? 1 : -1;
+    return nextDue(a) < nextDue(b) ? -1 : 1;
+  });
+  return `
+  <div class="row between" style="margin-bottom:10px">
+    <div class="row"><button class="icon-btn" data-act="go-budget" aria-label="Back">‹</button><h2>Bills &amp; recurring</h2></div>
+    <button class="btn sm soft" data-act="add-sched">+ Add</button>
+  </div>
+  <div class="grid2" style="margin-bottom:12px">
+    <div class="stat"><div class="lbl">Recurring out / month</div><div class="val">${money(Math.round(monthlyOut))}</div></div>
+    <div class="stat"><div class="lbl">Recurring in / month</div><div class="val" style="color:var(--ok)">${money(Math.round(monthlyIn))}</div></div>
+  </div>
+  <div class="row wrap" style="margin-bottom:12px">
+    <button class="btn sm ghost" data-act="export-ics">📅 Add to Calendar</button>
+    <button class="btn sm ghost" data-act="plan-recurring">↻ Plan ${esc(curPeriod().label)} from these</button>
+  </div>
+  ${list.map((s) => {
+    const ended = isEnded(s); const d = daysBetween(today(), nextDue(s));
+    return `<div class="card" style="padding:12px;${!s.active || ended ? 'opacity:.55' : ''}">
+      <div class="row between"><button class="cat-name" data-act="edit-sched" data-id="${s.id}" style="padding:0"><span class="nm">${esc(s.name)}</span>${s.autoPost ? '<span class="tag">Auto</span>' : '<span class="tag z">Bill</span>'}</button>
+        <span class="num" style="font-weight:800;${s.type === 'income' ? 'color:var(--ok)' : ''}">${s.type === 'income' ? '+' : ''}${money(s.amount)}</span></div>
+      <div class="cat-sub" style="margin-top:4px"><span>${FREQS[s.freq]} · ${esc(catName(s.categoryId))}</span>
+        <span>${!s.active ? 'Paused' : ended ? 'Ended' : `<span class="pill ${dueCls(d)}">${dueLabel(d)}</span> ${fmtDate(nextDue(s), { day: 'numeric', month: 'short' })}`}</span></div>
+      ${s.active && !ended && !s.autoPost ? `<div class="row" style="margin-top:10px"><button class="btn sm soft" data-act="pay-sched" data-id="${s.id}">${s.type === 'income' ? '✓ Received' : '✓ Mark paid'}</button><button class="btn sm ghost" data-act="skip-sched" data-id="${s.id}">Skip this one</button></div>` : ''}
+    </div>`;
+  }).join('') || '<div class="card"><p class="empty">No bills or recurring items yet. Add rent, salary, phone, insurance, subscriptions…</p></div>'}
+  <p class="hint"><b>Bill</b> = reminds you, then you tap "Mark paid" (good for amounts that vary, like electricity). <b>Auto</b> = added to your transactions automatically on the due date (good for fixed amounts like salary or rent).</p>`;
+};
+
+function schedModal(s) {
+  const isNew = !s;
+  s = s ? clone(s) : { id: uid(), name: '', type: 'expense', amount: 0, categoryId: '', freq: 'monthly', startDate: today(), count: 0, autoPost: false, remindDays: 1, endDate: '', notes: '', active: true };
+  openModal(`${modalHead(isNew ? 'New bill / recurring item' : 'Edit recurring item')}
+    <div class="seg full" style="margin-bottom:12px"><button data-type="expense" class="${s.type !== 'income' ? 'active' : ''}">Bill / expense</button><button data-type="income" class="${s.type === 'income' ? 'active' : ''}">Income</button></div>
+    <label class="field"><span>Name</span><input id="s-name" value="${esc(s.name)}" placeholder="e.g. Rent, Salary, Optus, Car insurance"></label>
+    <div class="grid2">
+      <label class="field"><span>Amount</span><input id="s-amt" inputmode="decimal" value="${centsInput(s.amount)}" placeholder="0.00"></label>
+      <label class="field"><span>How often</span><select id="s-freq">${Object.entries(FREQS).map(([k, v]) => `<option value="${k}" ${s.freq === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label class="field"><span>Next due date</span><input id="s-next" type="date" value="${nextDue(s)}"></label>
+      <label class="field"><span>Ends (optional)</span><input id="s-end" type="date" value="${s.endDate || ''}"></label>
+    </div>
+    <label class="field"><span>Category</span><select id="s-cat">${catOptions(s.categoryId, { incomeFirst: s.type === 'income' })}</select></label>
+    <div class="toggle"><div class="t-text"><b>Add automatically</b><small>On the due date, the transaction is added for you. Leave off to get a reminder and tap "Mark paid" instead.</small></div>${switchHtml('id="s-auto"', s.autoPost)}</div>
+    <label class="field" style="margin-top:8px"><span>Calendar reminder</span><select id="s-remind">${[[0, 'On the day (9am)'], [1, '1 day before'], [2, '2 days before'], [3, '3 days before'], [7, '1 week before']].map(([v, l]) => `<option value="${v}" ${+s.remindDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    ${isNew ? '' : `<div class="toggle"><div class="t-text"><b>Active</b><small>Turn off to pause without deleting.</small></div>${switchHtml('id="s-active"', s.active)}</div>`}
+    <div class="modal-actions">${isNew ? '' : '<button class="btn danger" id="s-del">Delete</button>'}<button class="btn" id="s-save">Save</button></div>`, {
+    onMount(m) {
+      $$('.seg button', m).forEach((b) => (b.onclick = () => {
+        s.type = b.dataset.type; $$('.seg button', m).forEach((x) => x.classList.toggle('active', x === b));
+        const sel = $('#s-cat', m); sel.innerHTML = catOptions(sel.value, { incomeFirst: s.type === 'income' });
+      }));
+      $('#s-save', m).onclick = async () => {
+        const name = $('#s-name', m).value.trim(); const amount = toCents($('#s-amt', m).value);
+        if (!name || amount <= 0) return toast('Enter a name and amount');
+        const next = $('#s-next', m).value || today();
+        const freq = $('#s-freq', m).value;
+        if (next !== nextDue(s) || freq !== s.freq) { s.startDate = next; s.count = 0; }
+        Object.assign(s, { name, amount, freq, categoryId: $('#s-cat', m).value, endDate: $('#s-end', m).value, autoPost: $('#s-auto', m).checked, remindDays: +$('#s-remind', m).value, active: $('#s-active', m) ? $('#s-active', m).checked : true });
+        await saveRec('schedules', s);
+        const posted = await processSchedules();
+        closeModal(); toast(posted ? `Saved · ${posted} past-due entr${posted === 1 ? 'y' : 'ies'} added` : 'Saved'); rerender();
+      };
+      $('#s-del', m) && ($('#s-del', m).onclick = async () => {
+        if (!confirm(`Delete "${s.name}"? Transactions already recorded are kept.`)) return;
+        await delRec('schedules', s.id); closeModal(); rerender();
+      });
+    }
+  });
+}
+
+function paySchedule(s) {
+  const amt = s.amount;
+  txModal(null, { date: today(), type: s.type, amount: amt, merchant: s.name, notes: s.notes || '', splits: [{ categoryId: s.categoryId, amount: amt }], scheduleId: s.id },
+    async () => { s.count = (s.count || 0) + 1; await saveRec('schedules', s); });
+}
+
+async function planFromRecurring() {
+  const p = curPeriod(); const per = new Map();
+  for (const s of S.schedules) {
+    if (!s.active) continue;
+    for (let n = 0; n < 3000; n++) {
+      const d = occurrence(s, n);
+      if (d > p.end || (s.endDate && d > s.endDate)) break;
+      if (d >= p.start) per.set(s.categoryId, (per.get(s.categoryId) || 0) + s.amount);
+    }
+  }
+  per.delete('');
+  if (!per.size) return toast(`No bills or recurring items fall in ${p.label}`);
+  const conflicts = [...per].filter(([c, v]) => planned(p, c) && planned(p, c) !== v);
+  if (conflicts.length && !confirm(`${conflicts.length} categor${conflicts.length === 1 ? 'y already has' : 'ies already have'} a different planned amount. Replace with the recurring totals?`)) return;
+  for (const [c, v] of per) await setPlanned(p, c, v);
+  toast(`Planned ${per.size} categor${per.size === 1 ? 'y' : 'ies'} from recurring items`); go('budget');
+}
+
+// ---------- Calendar (.ics) ----------
+function buildICS() {
+  const esc2 = (t) => String(t).replace(/[\\;,]/g, (m) => '\\' + m).replace(/\n/g, '\\n');
+  const d = (x) => x.replace(/-/g, '');
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const alarm = (days, text) => ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc2(text)}`,
+    `TRIGGER:${days === 0 ? 'PT9H' : `-PT${days * 24 - 9}H`}`, 'END:VALARM'];
+  const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Amanah Budget//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Amanah Budget'];
+  for (const s of S.schedules) {
+    if (!s.active || isEnded(s)) continue;
+    const start = nextDue(s); const day = +start.slice(8);
+    let rule = { weekly: 'FREQ=WEEKLY', fortnightly: 'FREQ=WEEKLY;INTERVAL=2', monthly: 'FREQ=MONTHLY', quarterly: 'FREQ=MONTHLY;INTERVAL=3', yearly: 'FREQ=YEARLY' }[s.freq];
+    if ((s.freq === 'monthly' || s.freq === 'quarterly') && day > 28) rule += ';BYMONTHDAY=-1';
+    if (s.endDate) rule += `;UNTIL=${d(s.endDate)}`;
+    const title = `${s.type === 'income' ? '💰' : '🧾'} ${s.name} – ${money(s.amount)}`;
+    L.push('BEGIN:VEVENT', `UID:sched-${s.id}@amanah-budget`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${d(start)}`, `DTEND;VALUE=DATE:${d(addDays(start, 1))}`,
+      `RRULE:${rule}`, `SUMMARY:${esc2(title)}`, `DESCRIPTION:${esc2(`${catName(s.categoryId)} · open Amanah Budget to mark it ${s.type === 'income' ? 'received' : 'paid'}`)}`,
+      'TRANSP:TRANSPARENT', ...alarm(+s.remindDays || 0, title), 'END:VEVENT');
+  }
+  const h = hawlInfo();
+  if (h.start) {
+    const o = zakatOwed();
+    const title = `🌙 Zakat due – Hawl complete${o.due ? ` (≈ ${money(o.due)})` : ''}`;
+    L.push('BEGIN:VEVENT', `UID:zakat-${h.start}@amanah-budget`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${d(h.due)}`, `DTEND;VALUE=DATE:${d(addDays(h.due, 1))}`,
+      `SUMMARY:${esc2(title)}`, `DESCRIPTION:${esc2(`Hawl started ${fmtDate(h.start)}. ${hijri(h.due)}.`)}`, 'TRANSP:TRANSPARENT',
+      ...alarm(7, title), ...alarm(0, title), 'END:VEVENT');
+  }
+  L.push('END:VCALENDAR');
+  return L.join('\r\n');
+}
+
+function exportICS() {
+  const count = S.schedules.filter((s) => s.active && !isEnded(s)).length + (S.settings.hawlStart ? 1 : 0);
+  if (!count) return toast('Add bills or set your Hawl date first');
+  const ics = buildICS();
+  const file = new File([ics], 'amanah-reminders.ics', { type: 'text/calendar' });
+  openModal(`${modalHead('Add reminders to Calendar')}
+    <p style="margin-top:0">${count} reminder${count === 1 ? '' : 's'} ready: your bills and recurring items${S.settings.hawlStart ? ', plus your Zakat due date' : ''}. Your phone's Calendar will alert you, even with no internet.</p>
+    <div class="stack">
+      <button class="btn block" id="ics-dl">📅 Open in Calendar</button>
+      ${navigator.canShare && navigator.canShare({ files: [file] }) ? '<button class="btn block ghost" id="ics-share">Share file…</button>' : ''}
+    </div>
+    <p class="hint">iPhone: if "Open in Calendar" doesn't offer "Add All", use Share file → Save to Files, then tap the file in the Files app. After changing bills, export again — events update rather than duplicate in most calendars.</p>`, {
+    onMount(m) {
+      $('#ics-dl', m).onclick = () => { download('amanah-reminders.ics', ics, 'text/calendar'); };
+      $('#ics-share', m) && ($('#ics-share', m).onclick = () => navigator.share({ files: [file], title: 'Amanah Budget reminders' }).catch(() => {}));
+    }
+  });
+}
+
+// ---------- Debt payoff planner ----------
+function debtCurrent(d) {
+  if (!d.categoryId) return d.balance;
+  let paid = 0;
+  for (const t of S.transactions) {
+    if (t.type === 'income' || t.date < (d.asOf || '0000')) continue;
+    for (const sp of t.splits) if (sp.categoryId === d.categoryId) paid += sp.amount;
+  }
+  return Math.max(0, d.balance - paid);
+}
+
+function simulateDebts(strategy, extra) {
+  const ds = S.debts.map((d) => ({ id: d.id, name: d.name, bal: debtCurrent(d), min: d.minPayment || 0, rate: (d.rate || 0) / 1200, month: null })).filter((d) => d.bal > 0);
+  if (!ds.length) return null;
+  const order = [...ds].sort(strategy === 'avalanche' ? (a, b) => b.rate - a.rate || a.bal - b.bal : (a, b) => a.bal - b.bal);
+  const budget = ds.reduce((s, d) => s + d.min, 0) + extra;
+  let m = 0, interest = 0;
+  while (ds.some((d) => d.bal > 0) && m < 600) {
+    m++;
+    for (const d of ds) if (d.bal > 0) { const i = Math.round(d.bal * d.rate); d.bal += i; interest += i; }
+    let pool = budget;
+    for (const d of order) if (d.bal > 0) { const pay = Math.min(d.min, d.bal, pool); d.bal -= pay; pool -= pay; }
+    for (const d of order) if (d.bal > 0 && pool > 0) { const pay = Math.min(d.bal, pool); d.bal -= pay; pool -= pay; }
+    for (const d of ds) if (d.bal <= 0 && d.month === null) d.month = m;
+  }
+  return { stuck: m >= 600, months: m, interest, order, date: addMonths(today(), m) };
+}
+
+function debtHtml() {
+  const st = S.settings; const strategy = st.debtStrategy || 'snowball'; const extra = st.debtExtra || 0;
+  const total = S.debts.reduce((s, d) => s + debtCurrent(d), 0);
+  const plan = simulateDebts(strategy, extra);
+  const base = extra ? simulateDebts(strategy, 0) : null;
+  return `
+  <div class="row between" style="margin:22px 0 10px"><h2>Debt payoff</h2><button class="btn sm soft" data-act="add-debt">+ Add debt</button></div>
+  <div class="card">
+    ${S.debts.length ? S.debts.map((d) => `<button class="pay-item" data-act="edit-debt" data-id="${d.id}">
+      <span><b>${esc(d.name)}</b><small>Min ${money(d.minPayment)}/mo · ${d.rate ? d.rate + '% p.a.' : 'interest-free'}${d.categoryId ? ' · tracks ' + esc(catName(d.categoryId)) : ''}</small></span>
+      <span class="num" style="font-weight:700;color:var(--over)">${money(debtCurrent(d))}</span></button>`).join('') + `<div class="zk-line total"><span>Total owed</span><span>${money(total)}</span></div>`
+      : '<p class="empty">No debts added. Add credit cards, car loans, family loans or any other money you owe to plan your way to debt-free.</p>'}
+  </div>
+  ${plan ? `<div class="card">
+    <div class="seg full" style="margin-bottom:12px">
+      <button data-act="debt-strategy" data-v="snowball" class="${strategy === 'snowball' ? 'active' : ''}">Snowball (smallest first)</button>
+      <button data-act="debt-strategy" data-v="avalanche" class="${strategy === 'avalanche' ? 'active' : ''}">Avalanche (highest rate first)</button>
+    </div>
+    <label class="field"><span>Extra I can pay each month (on top of minimums)</span><input inputmode="decimal" value="${centsInput(extra)}" placeholder="0.00" data-change="debt-extra"></label>
+    ${plan.stuck ? '<p class="hint" style="color:var(--over)">At these payments the debts never get paid off (interest grows faster). Increase the minimums or the extra amount.</p>' : `
+    <div class="grid3">
+      <div class="stat"><div class="lbl">Debt-free by</div><div class="val">${fmtDate(plan.date, { month: 'short', year: 'numeric' })}</div></div>
+      <div class="stat"><div class="lbl">Months</div><div class="val">${plan.months}</div></div>
+      <div class="stat"><div class="lbl">Interest paid</div><div class="val">${money(plan.interest)}</div></div>
+    </div>
+    ${base && !base.stuck ? `<p class="hint">With the extra ${money(extra)}/month you're debt-free <b>${base.months - plan.months} months sooner</b>${base.interest - plan.interest > 0 ? ` and save <b>${money(base.interest - plan.interest)}</b> in interest` : ''}.</p>` : ''}
+    <h3 style="margin:12px 0 4px">Payoff order</h3>
+    ${plan.order.map((d, i) => `<div class="zk-line"><span>${i + 1}. ${esc(d.name)}</span><span>${fmtDate(addMonths(today(), d.month), { month: 'short', year: 'numeric' })}</span></div>`).join('')}`}
+    <p class="hint">Once a debt is cleared, its payment rolls onto the next one. That's the snowball. Link a debt to a budget category and payments you record there reduce its balance automatically.</p>
+  </div>` : ''}`;
+}
+
+function debtModal(d) {
+  const isNew = !d;
+  d = d ? clone(d) : { id: uid(), name: '', balance: 0, asOf: today(), minPayment: 0, rate: 0, categoryId: '' };
+  const debtGroup = S.groups.find((g) => /debt/i.test(g.name));
+  openModal(`${modalHead(isNew ? 'Add a debt' : 'Edit debt')}
+    <label class="field"><span>Name</span><input id="d-name" value="${esc(d.name)}" placeholder="e.g. Credit card, Car loan, Loan from brother"></label>
+    <div class="grid2">
+      <label class="field"><span>Balance owed</span><input id="d-bal" inputmode="decimal" value="${centsInput(d.balance)}" placeholder="0.00"></label>
+      <label class="field"><span>As at</span><input id="d-asof" type="date" value="${d.asOf || today()}"></label>
+      <label class="field"><span>Minimum monthly payment</span><input id="d-min" inputmode="decimal" value="${centsInput(d.minPayment)}" placeholder="0.00"></label>
+      <label class="field"><span>Interest % p.a. (0 if interest-free)</span><input id="d-rate" inputmode="decimal" value="${d.rate || ''}" placeholder="0"></label>
+    </div>
+    <label class="field"><span>Payments are budgeted in (optional)</span><select id="d-cat"><option value="">Not linked — I'll update the balance myself</option>${catOptions(d.categoryId || (isNew ? '' : ''), { includeIncome: false, includeNone: false })}</select></label>
+    ${debtGroup && isNew ? `<p class="hint" style="margin-top:-4px">Tip: add a category for this debt in "${esc(debtGroup.name)}" and link it here.</p>` : ''}
+    <div class="modal-actions">${isNew ? '' : '<button class="btn danger" id="d-del">Delete</button>'}<button class="btn" id="d-save">Save</button></div>`, {
+    onMount(m) {
+      if (!d.categoryId) $('#d-cat', m).value = '';
+      $('#d-save', m).onclick = async () => {
+        const name = $('#d-name', m).value.trim(); const bal = Math.abs(toCents($('#d-bal', m).value));
+        if (!name) return toast('Enter a name');
+        Object.assign(d, { name, balance: bal, asOf: $('#d-asof', m).value || today(), minPayment: Math.abs(toCents($('#d-min', m).value)), rate: Math.max(0, parseFloat($('#d-rate', m).value) || 0), categoryId: $('#d-cat', m).value });
+        await saveRec('debts', d); closeModal(); rerender();
+      };
+      $('#d-del', m) && ($('#d-del', m).onclick = async () => { if (!confirm(`Delete "${d.name}"?`)) return; await delRec('debts', d.id); closeModal(); rerender(); });
+    }
+  });
+}
+
+// ---------- Encrypted backup (AES-256-GCM, key from passphrase via PBKDF2) ----------
+const PBKDF2_ITER = 310000;
+function b64enc(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
+function b64dec(str) { const bin = atob(str); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+async function deriveKey(pass, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptBackup(obj, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)); const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt, PBKDF2_ITER);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return { app: 'amanah-budget', encrypted: true, v: 1, kdf: 'PBKDF2-SHA256', iter: PBKDF2_ITER, cipher: 'AES-256-GCM', exported: new Date().toISOString(), salt: b64enc(salt), iv: b64enc(iv), data: b64enc(new Uint8Array(ct)) };
+}
+async function decryptBackup(p, pass) {
+  const key = await deriveKey(pass, b64dec(p.salt), p.iter || PBKDF2_ITER);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64dec(p.iv) }, key, b64dec(p.data));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+function encBackupModal() {
+  if (!(self.crypto && crypto.subtle)) return alert('Encrypted backup needs a secure (https) connection. Open the app from its https address.');
+  openModal(`${modalHead('Encrypted backup')}
+    <p style="margin-top:0">Your budget is locked with a passphrase on this phone <b>before</b> it's saved, so the file is unreadable in iCloud Drive, Google Drive or email without it.</p>
+    <label class="field"><span>Passphrase (at least 8 characters)</span><input id="e-p1" type="password" autocomplete="new-password"></label>
+    <label class="field"><span>Repeat passphrase</span><input id="e-p2" type="password" autocomplete="new-password"></label>
+    <p class="hint" style="margin-top:-4px">⚠️ Write it down somewhere safe. If it's forgotten, the backup can't be opened by anyone, including you.</p>
+    <div id="e-out"></div>
+    <div class="modal-actions" id="e-act"><button class="btn" id="e-go">🔒 Encrypt backup</button></div>`, {
+    onMount(m) {
+      $('#e-go', m).onclick = async () => {
+        const p1 = $('#e-p1', m).value, p2 = $('#e-p2', m).value;
+        if (p1.length < 8) return toast('Use at least 8 characters');
+        if (p1 !== p2) return toast("Passphrases don't match");
+        $('#e-go', m).disabled = true; $('#e-go', m).textContent = 'Encrypting…';
+        const data = await DB.dumpAll();
+        const enc = await encryptBackup({ app: 'amanah-budget', version: 1, appVersion: APP_VERSION, exported: new Date().toISOString(), data }, p1);
+        const text = JSON.stringify(enc); const name = `amanah-backup-${today()}.amanah.json`;
+        const file = new File([text], name, { type: 'application/json' });
+        S.settings.lastBackup = today(); await saveSettings();
+        $('#e-act', m).innerHTML = '';
+        const canShare = navigator.canShare && navigator.canShare({ files: [file] });
+        $('#e-out', m).innerHTML = `<div class="notice ok">✓ Encrypted (${Math.round(text.length / 1024)} KB). Now save it:</div>
+          <div class="stack">${canShare ? '<button class="btn block" id="e-share">Save to iCloud Drive / Google Drive…</button>' : ''}
+          <button class="btn block ${canShare ? 'ghost' : ''}" id="e-dl">⬇ Download file</button></div>
+          <p class="hint">In the share sheet choose <b>Save to Files → iCloud Drive</b> (iPhone) or <b>Drive</b> (Android). To restore: Settings → Restore from backup, pick the file and enter the passphrase.</p>`;
+        $('#e-share', m) && ($('#e-share', m).onclick = () => navigator.share({ files: [file], title: 'Amanah Budget backup' }).then(() => toast('Backup saved')).catch(() => {}));
+        $('#e-dl', m).onclick = () => { download(name, text); toast('Backup downloaded'); };
+        rerender();
+      };
+    }
+  });
+}
+
+Object.assign(ACTIONS, {
+  'go-bills': () => go('bills'),
+  'go-budget': () => go('budget'),
+  'go-zakat': () => go('zakat'),
+  'add-sched': () => schedModal(null),
+  'edit-sched': (el) => schedModal(S.schedules.find((s) => s.id === el.dataset.id)),
+  'pay-sched': (el) => paySchedule(S.schedules.find((s) => s.id === el.dataset.id)),
+  'skip-sched': async (el) => {
+    const s = S.schedules.find((x) => x.id === el.dataset.id);
+    if (!confirm(`Skip the ${fmtDate(nextDue(s))} "${s.name}"? Nothing will be recorded for it.`)) return;
+    s.count = (s.count || 0) + 1; await saveRec('schedules', s); rerender();
+  },
+  'plan-recurring': planFromRecurring,
+  'export-ics': exportICS,
+  'add-debt': () => debtModal(null),
+  'edit-debt': (el) => debtModal(S.debts.find((d) => d.id === el.dataset.id)),
+  'debt-strategy': async (el) => { S.settings.debtStrategy = el.dataset.v; await saveSettings(); rerender(); },
+  'backup-enc': encBackupModal
+});
+Object.assign(CHANGES, {
+  'debt-extra': async (el) => { S.settings.debtExtra = Math.abs(toCents(el.value)); await saveSettings(); rerender(); }
+});
+
 function bindGlobal() {
   const view = $('#view');
   view.addEventListener('click', (e) => {
@@ -1401,7 +1796,12 @@ async function main() {
   }
   applyTheme();
   bindGlobal();
+  const posted = await processSchedules();
   render();
+  if (posted) toast(`${posted} recurring transaction${posted === 1 ? '' : 's'} added`);
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && await processSchedules()) rerender();
+  });
   snapshot();
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && window.isSecureContext) {
@@ -1411,4 +1811,4 @@ async function main() {
 main();
 
 // Expose for debugging in the console
-window.__amanah = { S, periodFor, zakatCalc, fundBalance };
+window.__amanah = { S, periodFor, zakatCalc, fundBalance, simulateDebts, buildICS, encryptBackup, decryptBackup };

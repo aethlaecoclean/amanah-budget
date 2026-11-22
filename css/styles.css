@@ -324,3 +324,11 @@ tr.dup td { opacity: .55; }
 
 .notice { padding: 10px 12px; border-radius: 10px; background: var(--gold-soft); color: var(--text); font-size: .85rem; margin-bottom: 12px; }
 .notice.ok { background: var(--ok-soft); }
+
+/* ---------- v1.1: reminders ---------- */
+.due-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.due-item:last-child { border-bottom: 0; }
+.due-item > span:first-child { min-width: 0; }
+.due-item b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.due-item small { display: block; color: var(--muted); font-size: .8rem; margin-top: 2px; }
+.due-item .row { gap: 8px; flex: none; }

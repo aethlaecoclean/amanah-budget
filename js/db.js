@@ -1,10 +1,10 @@
 // Minimal promise wrapper around native IndexedDB. All data stays on this device.
 const DB_NAME = 'amanah-budget';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORES = [
   'settings', 'groups', 'categories', 'budgets', 'transactions',
-  'accounts', 'rules', 'zakatPayments', 'goals', 'snapshots'
+  'accounts', 'rules', 'zakatPayments', 'goals', 'snapshots', 'schedules', 'debts'
 ];
 const KEY_PATHS = { settings: 'key', snapshots: 'date' };
 

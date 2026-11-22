@@ -114,6 +114,16 @@ Sadaqah is logged separately from Zakat.
 
 **Goals:** Set a target and date (e.g. a $60,000 house deposit) and link the goal to a sinking fund. The goal shows the amount needed per month, fortnight and week. The "If I save $X per month" calculator shows when you'd reach it.
 
+**Bills & recurring (new in 1.1):** Open *Budget → Coming up → Bills & recurring* or *Transactions → ↻ Recurring*. Add rent, salary, phone, insurance and subscriptions:
+- **Auto** items are added to your transactions on their due date, the next time you open the app.
+- **Bill** items show in *Coming up* until you tap **Mark paid**. You can change the amount for bills that vary, like electricity.
+- **↻ From bills** fills this period's plan from your recurring items.
+- **📅 Add to Calendar** exports your bills and your Zakat due date with alerts. Your phone reminds you even when the app is closed and you're offline.
+
+**Debt payoff (Goals tab):** Add each debt with its minimum payment and interest rate (0 for interest-free). Choose *Snowball* (smallest balance first) or *Avalanche* (highest rate first) and enter any extra you can pay. The planner shows your debt-free date, the payoff order and the interest saved.
+
+**Encrypted backup:** *Settings → 🔒 Encrypted backup*. Your data is locked with your passphrase (AES-256) before it leaves the phone. Then save it to iCloud Drive or Google Drive from the share sheet. To restore, use *Restore from backup* and enter the passphrase. A forgotten passphrase can't be recovered.
+
 **Reports:** Spending by category, planned vs actual by group, Zakat paid vs remaining, and net worth, savings and zakatable wealth over time. The app saves one snapshot per day.
 
 *The Zakat module does the arithmetic: 2.5% of net zakatable wealth held above the Nisab for one lunar year. Scholars differ on how to treat superannuation, shares, debts and jewellery. Check with a scholar or your local Zakat organisation for your own situation.*

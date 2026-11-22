@@ -1,6 +1,6 @@
 // Amanah Budget service worker — caches the app shell so it runs fully offline.
 // Bump CACHE when you change any file so phones pick up the new version.
-const CACHE = 'amanah-v1.0.0';
+const CACHE = 'amanah-v1.1.0';
 const ASSETS = [
   './',
   './index.html',
